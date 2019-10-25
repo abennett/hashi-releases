@@ -30,6 +30,7 @@ func Route() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Logger)
+	r.Use(middleware.SetHeader("Content-Type", "application/json"))
 	r.Get("/", handleRoot)
 	r.Get("/latest/{product}", handleProductLatest)
 	r.Get("/versions/{product}", handleListVersions)
