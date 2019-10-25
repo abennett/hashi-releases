@@ -2,28 +2,28 @@ package main
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
+	"github.com/mitchellh/cli"
 )
 
-var releaseDB *Releases
+var (
+	index      = NewIndex()
+	ListenPort = ":8080"
+)
 
 func main() {
-	releaseDB = NewReleases()
-	log.Println("Fetching all releases")
-	_, err := releaseDB.FetchAllReleases()
+	c := cli.NewCLI("hashi-all", "0.0.1")
+	c.Args = os.Args[1:]
+	c.Commands = index.Commands()
+	exitStatus, err := c.Run()
 	if err != nil {
 		panic(err)
 	}
-	log.Print("Fetched all releases")
-	releaseDB.BuildReleaseDB()
-	log.Println("DB built")
-	r := Route()
-	log.Println("serving on :8080")
-	log.Fatal(http.ListenAndServe(":8080", r))
+	os.Exit(exitStatus)
 }
 
 func Route() *chi.Mux {
@@ -52,37 +52,31 @@ func handleRoot(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleListProducts(w http.ResponseWriter, r *http.Request) {
-	products := releaseDB.ListProducts()
-	resp := struct {
-		Products []string `json:"products"`
-	}{
-		Products: products,
-	}
-	json.NewEncoder(w).Encode(resp)
+	products := index.ListProducts()
+	json.NewEncoder(w).Encode(products)
 }
 
 func handleProductLatest(w http.ResponseWriter, r *http.Request) {
 	product := chi.URLParam(r, "product")
-	version, ok := releaseDB.LatestVersion(product)
-	if !ok {
+	latest := index.LatestVersion(product)
+	if latest == "" {
 		http.Error(w, product+" not found", http.StatusNotFound)
 		return
 	}
 	resp := struct {
 		Product string `json:"product"`
-		Version string `json:"version"`
+		Latest  string `json:"latest_version"`
 	}{
 		Product: product,
-		Version: version,
+		Latest:  latest,
 	}
 	json.NewEncoder(w).Encode(resp)
-	return
 }
 
 func handleListVersions(w http.ResponseWriter, r *http.Request) {
 	product := chi.URLParam(r, "product")
-	versions, err := releaseDB.ListAllVersions(product)
-	if err != nil {
+	versions := index.ListVersions(product)
+	if versions == nil {
 		http.Error(w, product+" not found", http.StatusNotFound)
 		return
 	}

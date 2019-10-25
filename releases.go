@@ -1,13 +1,18 @@
 package main
 
 import (
-	"fmt"
-	"log"
+	"encoding/json"
+	"io"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"path"
+	"runtime"
 	"sort"
 	"strings"
 
-	"github.com/gocolly/colly"
 	"github.com/hashicorp/go-version"
+	"github.com/mitchellh/cli"
 )
 
 const (
@@ -15,180 +20,193 @@ const (
 	ReleasesDomain = "releases.hashicorp.com"
 )
 
+var tmpDir = path.Join(os.TempDir(), "hashi-releases")
+
 type Releases struct {
-	scraper  *colly.Collector
-	Releases []*Release
-	db       DB
+	Index Index
 }
 
-type DB map[string]*Versions
+type Index map[string]*Product
 
-type Release struct {
-	Product string
-	Version *version.Version
-	OS      string
-	Arch    string
-	Link    string
+type Product struct {
+	Name     string              `json:"name"`
+	Versions map[string]*Version `json:"versions"`
+	Sorted   version.Collection
+	isSorted bool
 }
 
-type Versions []*Version
-
-func (v Versions) Len() int {
-	return len(v)
-}
-
-func (v Versions) Less(i, j int) bool {
-	return v[i].Version.LessThan(v[j].Version)
-}
-
-func (v Versions) Swap(i, j int) {
-	v[i], v[j] = v[j], v[i]
+func (p *Product) sortVersions() error {
+	collection := make(version.Collection, len(p.Versions))
+	var idx int
+	for k, _ := range p.Versions {
+		v, err := version.NewVersion(k)
+		if err != nil {
+			return err
+		}
+		collection[idx] = v
+		idx++
+	}
+	p.Sorted = collection
+	sort.Sort(p.Sorted)
+	p.isSorted = true
+	return nil
 }
 
 type Version struct {
-	Version *version.Version
-	OS      map[string]map[string]*Release
+	Product    string   `json:"name"`
+	Version    string   `json:"version"`
+	SHASums    string   `json:"shasums"`
+	ShaSumsSig string   `json:"shasums_signature"`
+	Builds     []*Build `json:"builds"`
 }
 
-func NewReleases() *Releases {
-	c := colly.NewCollector(
-		colly.AllowedDomains(ReleasesDomain),
-		colly.Async(true),
-	)
-	c.Limit(&colly.LimitRule{
-		DomainGlob:  "*",
-		Parallelism: 10,
-	})
-	return &Releases{
-		scraper: c,
-		db:      make(DB),
-	}
+type Build struct {
+	Product  string `json:"name"`
+	Version  string `json:"version"`
+	OS       string `json:"os"`
+	Arch     string `json:"arch"`
+	Filename string `json:"filename"`
+	URL      string `json:"url"`
 }
 
-func collectReleases(releaseChan <-chan *Release, out chan<- []*Release) {
-	var count int
-	var releases []*Release
-	for release := range releaseChan {
-		count++
-		fmt.Printf("\r%d files located", count)
-		releases = append(releases, release)
-	}
-	fmt.Println()
-	out <- releases
-}
-
-func (r *Releases) FetchAllReleases() ([]*Release, error) {
-	releaseChan := make(chan *Release, 25)
-	outChan := make(chan []*Release)
-	go collectReleases(releaseChan, outChan)
-	r.scraper.OnHTML("a[href]", func(e *colly.HTMLElement) {
-		link := e.Attr("href")
-		if strings.HasSuffix(link, ".zip") || strings.HasSuffix(link, ".tgz") {
-			releaseChan <- ParseBinaryLink(link)
+func (v *Version) GetBuild(os, arch string) *Build {
+	for idx, b := range v.Builds {
+		if b.OS == os && b.Arch == arch {
+			return v.Builds[idx]
 		}
-		if strings.HasSuffix(link, "/") {
-			e.Request.Visit(link)
-		}
-	})
-	r.scraper.OnError(func(r *colly.Response, err error) {
-		log.Printf("[ERROR] on %s: %v", r.Request.URL, err)
-	})
-	r.scraper.Visit(ReleasesURL)
-	r.scraper.Wait()
-	close(releaseChan)
-	r.Releases = <-outChan
-	return r.Releases, nil
-}
-
-func (r *Releases) BuildReleaseDB() {
-	for x := 0; x < len(r.Releases); x++ {
-		r.db.Insert(r.Releases[x])
 	}
+	return nil
 }
 
-func (rdb DB) Insert(release *Release) {
-	product := strings.ToLower(release.Product)
-	versions, ok := rdb[product]
+func (b *Build) Download() error {
+	resp, err := http.Get(b.URL)
+	if err != nil {
+		return err
+	}
+	f, err := os.Create(b.Filename)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, err = io.Copy(f, resp.Body)
+	return err
+}
+
+func NewIndex() Index {
+	resp, err := http.Get(ReleasesURL + "/index.json")
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+	etag := resp.Header.Get("Etag")
+	etag = strings.Trim(etag, "\"")
+	if etag == "" {
+		panic("no etag found")
+	}
+	cacheFilePath := path.Join(tmpDir, etag)
+
+	b, err := ioutil.ReadFile(cacheFilePath)
+	if err != nil {
+		b, err = ioutil.ReadAll(resp.Body)
+		if err != nil {
+			panic(err)
+		}
+		if err = os.MkdirAll(path.Dir(cacheFilePath), 0700); err != nil {
+			panic(err)
+		}
+		if err = ioutil.WriteFile(cacheFilePath, b, 0600); err != nil {
+			panic(err)
+		}
+	}
+	var index Index
+	if err = json.Unmarshal(b, &index); err != nil {
+		panic(err)
+	}
+	for _, v := range index {
+		if err = v.sortVersions(); err != nil {
+			panic(err)
+		}
+	}
+	return index
+}
+
+func (i Index) LatestVersion(product string) string {
+	p, ok := i[product]
 	if !ok {
-		version := &Version{
-			Version: release.Version,
-		}
-		version.insert(release)
-		rdb[product] = &Versions{version}
-		return
+		return ""
 	}
-	i := sort.Search(len(*versions), func(i int) bool {
-		return (*versions)[i].Version.GreaterThanOrEqual(release.Version)
-	})
-	if i == len(*versions) {
-		version := &Version{
-			Version: release.Version,
-		}
-		*versions = append(*versions, version)
-	}
-	if !(*versions)[i].Version.Equal(release.Version) {
-		version := &Version{
-			Version: release.Version,
-		}
-		*versions = append(*versions, &Version{})
-		copy((*versions)[i+1:], (*versions)[i:])
-		(*versions)[i] = version
-	}
-	(*versions)[i].insert(release)
+	return p.Sorted[len(p.Sorted)-1].Original()
 }
 
-func (v *Version) insert(release *Release) {
-	if _, ok := v.OS[release.OS]; !ok {
-		v.OS = make(map[string]map[string]*Release)
-		archMap := make(map[string]*Release)
-		v.OS[release.OS] = archMap
+func (i Index) LatestBuild(product, os, arch string) *Build {
+	p, ok := i[product]
+	if !ok {
+		return nil
 	}
-	v.OS[release.OS][release.Arch] = release
+	v, ok := p.Versions[p.Sorted[len(p.Sorted)-1].Original()]
+	if !ok {
+		return nil
+	}
+	return v.GetBuild(os, arch)
 }
 
-func ParseBinaryLink(link string) *Release {
-	spltLink := strings.Split(link, "/")
-	binary := spltLink[len(spltLink)-1]
-	spltBinary := strings.Split(binary, "_")
-	version, _ := version.NewVersion(spltBinary[1])
-	return &Release{
-		Product: spltBinary[0],
-		Version: version,
-		OS:      spltBinary[2],
-		Arch:    strings.TrimSuffix(spltBinary[3], ".zip"),
-		Link:    ReleasesURL + link,
+func (i Index) ListVersions(product string) []string {
+	p, ok := i[product]
+	if !ok {
+		return nil
 	}
+	versions := make([]string, len(p.Sorted))
+	for idx, v := range p.Sorted {
+		versions[idx] = v.Original()
+	}
+	return versions
 }
 
-func (r *Releases) ListProducts() []string {
-	products := make([]string, len(r.db))
-	var count int
-	for k, _ := range r.db {
-		products[count] = k
-		count++
+func (i Index) ListProducts() []string {
+	products := make([]string, len(i))
+	var idx int
+	for k, _ := range i {
+		products[idx] = k
+		idx++
 	}
-	sort.Strings(products)
 	return products
 }
 
-func (r *Releases) LatestVersion(product string) (string, bool) {
-	product = strings.ToLower(product)
-	versions, ok := r.db[product]
-	if !ok {
-		return "", false
-	}
-	return (*versions)[versions.Len()-1].Version.Original(), true
+type IndexCommand struct {
+	synopsis string
+	help     string
+	version  *Version
 }
 
-func (r *Releases) ListAllVersions(product string) ([]string, error) {
-	product = strings.ToLower(product)
-	versions, ok := r.db[product]
-	if !ok {
-		return nil, fmt.Errorf("%s not found", product)
+func (ic *IndexCommand) Help() string {
+	return ic.help
+}
+
+func (ic *IndexCommand) Synopsis() string {
+	return ic.synopsis
+}
+
+func (ic *IndexCommand) Run(args []string) int {
+	build := ic.version.GetBuild(runtime.GOOS, runtime.GOARCH)
+	if build == nil {
+		return 1
 	}
-	versionList := make([]string, versions.Len())
-	for x := 0; x < versions.Len(); x++ {
-		versionList[x] = (*versions)[x].Version.Original()
+	if err := build.Download(); err != nil {
+		return 1
 	}
-	return versionList, nil
+	return 0
+}
+
+func (i Index) Commands() map[string]cli.CommandFactory {
+	commands := make(map[string]cli.CommandFactory)
+	for product, versions := range i {
+		for version, versionInfo := range versions.Versions {
+			commands[product+" "+version] = func() (cli.Command, error) {
+				return &IndexCommand{
+					version: versionInfo,
+				}, nil
+			}
+		}
+	}
+	return commands
 }
