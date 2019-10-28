@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
@@ -20,7 +21,12 @@ const (
 	ReleasesDomain = "releases.hashicorp.com"
 )
 
-var tmpDir = path.Join(os.TempDir(), "hashi-releases")
+var (
+	localOS   = runtime.GOOS
+	localArch = runtime.GOARCH
+
+	tmpDir = path.Join(os.TempDir(), "hashi-releases")
+)
 
 type Releases struct {
 	Index Index
@@ -53,10 +59,11 @@ func (p *Product) sortVersions() error {
 }
 
 type Version struct {
-	Product    string   `json:"name"`
-	Version    string   `json:"version"`
-	SHASums    string   `json:"shasums"`
-	ShaSumsSig string   `json:"shasums_signature"`
+	Product    string `json:"name"`
+	Version    string `json:"version"`
+	SHASums    string `json:"shasums"`
+	SHASumsSig string `json:"shasums_signature"`
+	shaMap     map[string][]byte
 	Builds     []*Build `json:"builds"`
 }
 
@@ -69,12 +76,21 @@ type Build struct {
 	URL      string `json:"url"`
 }
 
-func (v *Version) GetBuild(os, arch string) *Build {
+func (v *Version) GetBuildForLocal() *Build {
 	for idx, b := range v.Builds {
-		if b.OS == os && b.Arch == arch {
+		if b.OS == localOS && b.Arch == localArch {
 			return v.Builds[idx]
 		}
 	}
+	return nil
+}
+
+func (v *Version) initSHAMap() error {
+	resp, err := http.Get(strings.Join([]string{ReleasesURL, v.Product, v.Version, v.SHASums}, "/"))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 	return nil
 }
 
@@ -147,7 +163,7 @@ func (i Index) LatestBuild(product, os, arch string) *Build {
 	if !ok {
 		return nil
 	}
-	return v.GetBuild(os, arch)
+	return v.GetBuildForLocal()
 }
 
 func (i Index) ListVersions(product string) []string {
@@ -187,8 +203,9 @@ func (ic *IndexCommand) Synopsis() string {
 }
 
 func (ic *IndexCommand) Run(args []string) int {
-	build := ic.version.GetBuild(runtime.GOOS, runtime.GOARCH)
+	build := ic.version.GetBuildForLocal()
 	if build == nil {
+		fmt.Printf("%s %s not found for this os and/or architecture\n", build.Product, build.Version)
 		return 1
 	}
 	if err := build.Download(); err != nil {
@@ -199,9 +216,17 @@ func (ic *IndexCommand) Run(args []string) int {
 
 func (i Index) Commands() map[string]cli.CommandFactory {
 	commands := make(map[string]cli.CommandFactory)
-	for product, versions := range i {
-		for version, versionInfo := range versions.Versions {
-			commands[product+" "+version] = func() (cli.Command, error) {
+	for _, product := range i {
+		for idx, _ := range product.Sorted {
+			versionNum := product.Sorted[idx].Original()
+			versionInfo, ok := product.Versions[versionNum]
+			if !ok {
+				panic(product.Name + " " + versionNum)
+			}
+			if versionInfo.GetBuildForLocal() == nil {
+				continue
+			}
+			commands[product.Name+" "+versionNum] = func() (cli.Command, error) {
 				return &IndexCommand{
 					version: versionInfo,
 				}, nil
