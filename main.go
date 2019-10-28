@@ -16,7 +16,7 @@ var (
 )
 
 func main() {
-	c := cli.NewCLI("hashi-all", "0.0.1")
+	c := cli.NewCLI("hashi-releases", "0.0.1")
 	c.Args = os.Args[1:]
 	c.Commands = index.Commands()
 	exitStatus, err := c.Run()
