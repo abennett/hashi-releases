@@ -4,6 +4,7 @@ go 1.13
 
 require (
 	github.com/go-chi/chi v4.0.2+incompatible
+	github.com/hashicorp/go-hclog v0.9.2
 	github.com/hashicorp/go-version v1.2.0
 	github.com/mitchellh/cli v1.0.0
 	golang.org/x/net v0.0.0-20191021144547-ec77196f6094 // indirect

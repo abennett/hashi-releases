@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -12,6 +13,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-version"
 	"github.com/mitchellh/cli"
 )
@@ -19,6 +21,8 @@ import (
 const (
 	ReleasesURL    = "https://releases.hashicorp.com"
 	ReleasesDomain = "releases.hashicorp.com"
+
+	indexSuffix = ".index"
 )
 
 var (
@@ -26,13 +30,17 @@ var (
 	localArch = runtime.GOARCH
 
 	tmpDir = path.Join(os.TempDir(), "hashi-releases")
+
+	logger hclog.Logger
 )
 
 type Releases struct {
 	Index Index
 }
 
-type Index map[string]*Product
+type Index struct {
+	Products map[string]*Product
+}
 
 type Product struct {
 	Name     string              `json:"name"`
@@ -59,11 +67,10 @@ func (p *Product) sortVersions() error {
 }
 
 type Version struct {
-	Product    string `json:"name"`
-	Version    string `json:"version"`
-	SHASums    string `json:"shasums"`
-	SHASumsSig string `json:"shasums_signature"`
-	shaMap     map[string][]byte
+	Product    string   `json:"name"`
+	Version    string   `json:"version"`
+	SHASums    string   `json:"shasums"`
+	SHASumsSig string   `json:"shasums_signature"`
 	Builds     []*Build `json:"builds"`
 }
 
@@ -85,16 +92,48 @@ func (v *Version) GetBuildForLocal() *Build {
 	return nil
 }
 
-func (v *Version) initSHAMap() error {
-	resp, err := http.Get(strings.Join([]string{ReleasesURL, v.Product, v.Version, v.SHASums}, "/"))
+func (i Index) DownloadBuildForLocal(product, version string) error {
+	p, ok := i.Products[product]
+	if !ok {
+		return fmt.Errorf("product %s not found", product)
+	}
+	v, ok := p.Versions[version]
+	if !ok {
+		return fmt.Errorf("version %s of %s not found", version, product)
+	}
+	build := v.GetBuildForLocal()
+	if build == nil {
+		return errors.New("no such build")
+	}
+	bts, err := build.Download()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	return nil
+	if err = CheckBytes(build.Filename, bts); err != nil {
+		return err
+	}
+	f, err := os.Create(build.Filename)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(bts)
+	return err
 }
 
-func (b *Build) Download() error {
+func (b *Build) Download() ([]byte, error) {
+	resp, err := http.Get(b.URL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	bts, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	return bts, nil
+}
+
+func (b *Build) DownloadAndSave() error {
 	resp, err := http.Get(b.URL)
 	if err != nil {
 		return err
@@ -119,7 +158,7 @@ func NewIndex() Index {
 	if etag == "" {
 		panic("no etag found")
 	}
-	cacheFilePath := path.Join(tmpDir, etag)
+	cacheFilePath := path.Join(tmpDir, etag, etag+indexSuffix)
 
 	b, err := ioutil.ReadFile(cacheFilePath)
 	if err != nil {
@@ -135,10 +174,10 @@ func NewIndex() Index {
 		}
 	}
 	var index Index
-	if err = json.Unmarshal(b, &index); err != nil {
+	if err = json.Unmarshal(b, &index.Products); err != nil {
 		panic(err)
 	}
-	for _, v := range index {
+	for _, v := range index.Products {
 		if err = v.sortVersions(); err != nil {
 			panic(err)
 		}
@@ -146,16 +185,16 @@ func NewIndex() Index {
 	return index
 }
 
-func (i Index) LatestVersion(product string) string {
-	p, ok := i[product]
+func (i *Index) LatestVersion(product string) string {
+	p, ok := i.Products[product]
 	if !ok {
 		return ""
 	}
 	return p.Sorted[len(p.Sorted)-1].Original()
 }
 
-func (i Index) LatestBuild(product, os, arch string) *Build {
-	p, ok := i[product]
+func (i *Index) LatestBuild(product, os, arch string) *Build {
+	p, ok := i.Products[product]
 	if !ok {
 		return nil
 	}
@@ -166,8 +205,8 @@ func (i Index) LatestBuild(product, os, arch string) *Build {
 	return v.GetBuildForLocal()
 }
 
-func (i Index) ListVersions(product string) []string {
-	p, ok := i[product]
+func (i *Index) ListVersions(product string) []string {
+	p, ok := i.Products[product]
 	if !ok {
 		return nil
 	}
@@ -178,10 +217,10 @@ func (i Index) ListVersions(product string) []string {
 	return versions
 }
 
-func (i Index) ListProducts() []string {
-	products := make([]string, len(i))
+func (i *Index) ListProducts() []string {
+	products := make([]string, len(i.Products))
 	var idx int
-	for k, _ := range i {
+	for k, _ := range i.Products {
 		products[idx] = k
 		idx++
 	}
@@ -191,7 +230,8 @@ func (i Index) ListProducts() []string {
 type IndexCommand struct {
 	synopsis string
 	help     string
-	version  *Version
+	product  string
+	index    *Index
 }
 
 func (ic *IndexCommand) Help() string {
@@ -203,34 +243,55 @@ func (ic *IndexCommand) Synopsis() string {
 }
 
 func (ic *IndexCommand) Run(args []string) int {
-	build := ic.version.GetBuildForLocal()
-	if build == nil {
-		fmt.Printf("%s %s not found for this os and/or architecture\n", build.Product, build.Version)
+	if len(args) != 1 {
+		fmt.Println("invalid number of arguments")
 		return 1
 	}
-	if err := build.Download(); err != nil {
+	version, ok := ic.index.Products[ic.product].Versions[args[0]]
+	if !ok {
+		fmt.Println(args[0] + " not found for " + ic.product)
+	}
+	if err := ic.index.DownloadBuildForLocal(ic.product, version.Version); err != nil {
+		fmt.Println(err)
 		return 1
 	}
 	return 0
 }
 
-func (i Index) Commands() map[string]cli.CommandFactory {
+type ListCommand struct {
+	list version.Collection
+}
+
+func (lc *ListCommand) Help() string {
+	return ""
+}
+
+func (lc *ListCommand) Synopsis() string {
+	return ""
+}
+
+func (lc *ListCommand) Run(args []string) int {
+	for _, v := range lc.list {
+		fmt.Println(v)
+	}
+	return 0
+}
+
+func (i *Index) Commands() map[string]cli.CommandFactory {
 	commands := make(map[string]cli.CommandFactory)
-	for _, product := range i {
-		for idx, _ := range product.Sorted {
-			versionNum := product.Sorted[idx].Original()
-			versionInfo, ok := product.Versions[versionNum]
-			if !ok {
-				panic(product.Name + " " + versionNum)
-			}
-			if versionInfo.GetBuildForLocal() == nil {
-				continue
-			}
-			commands[product.Name+" "+versionNum] = func() (cli.Command, error) {
-				return &IndexCommand{
-					version: versionInfo,
-				}, nil
-			}
+	for _, product := range i.Products {
+		name := product.Name
+		commands[name] = func() (cli.Command, error) {
+			return &IndexCommand{
+				product: name,
+				index:   i,
+			}, nil
+		}
+		list := product.Sorted
+		commands[name+" list"] = func() (cli.Command, error) {
+			return &ListCommand{
+				list: list,
+			}, nil
 		}
 	}
 	return commands
