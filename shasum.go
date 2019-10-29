@@ -35,7 +35,7 @@ func CheckBytes(fileName string, b []byte) error {
 	}
 	mapSum, ok := shas[fileName]
 	if !ok {
-		return errors.New("sum for file not found")
+		return errors.New("sum for file not found for " + fileName)
 	}
 	hash := sha256.New()
 	hash.Write(b)
@@ -62,7 +62,7 @@ func GetSHASums(product, version string) (map[string][]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		out[fields[1]] = b
+		out[strings.TrimPrefix(fields[1], "./")] = b
 	}
 	return out, nil
 }
