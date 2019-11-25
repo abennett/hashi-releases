@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,12 +114,35 @@ func (i Index) DownloadBuildForLocal(product, version string) error {
 	if err = CheckBytes(build.Filename, bts); err != nil {
 		return err
 	}
-	f, err := os.Create(build.Filename)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(bts)
+	_, err = ExtractZip(product, "", bts)
 	return err
+}
+
+func ExtractZip(product, parentDir string, bts []byte) (string, error) {
+	zipReader, err := zip.NewReader(bytes.NewReader(bts), int64(len(bts)))
+	if err != nil {
+		return "", err
+	}
+	finalPath := path.Join(parentDir, product)
+	outFile, err := os.OpenFile(finalPath, os.O_CREATE|os.O_RDWR, 0755)
+	if err != nil {
+		return "", err
+	}
+	var content io.ReadCloser
+	for _, f := range zipReader.File {
+		if f.Name == product {
+			zipFile, err := f.Open()
+			if err != nil {
+				return "", err
+			}
+			content = zipFile
+		}
+	}
+	_, err = io.Copy(outFile, content)
+	if err != nil {
+		return "", nil
+	}
+	return finalPath, nil
 }
 
 func (b *Build) Download() ([]byte, error) {

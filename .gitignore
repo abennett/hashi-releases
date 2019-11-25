@@ -12,3 +12,5 @@
 *.out
 
 hashi-releases
+*.zip
+*.json
