@@ -275,6 +275,7 @@ func (ic *IndexCommand) Run(args []string) int {
 	version, ok := ic.index.Products[ic.product].Versions[args[0]]
 	if !ok {
 		fmt.Println(args[0] + " not found for " + ic.product)
+		return 0
 	}
 	if err := ic.index.DownloadBuildForLocal(ic.product, version.Version); err != nil {
 		fmt.Println(err)
