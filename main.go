@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 
@@ -11,14 +12,36 @@ import (
 )
 
 var (
-	index      = NewIndex()
-	ListenPort = ":8080"
+	index              = NewIndex()
+	ListenPort         = ":8080"
+	appVersion         = "v1.0.1"
+	versionCommandHelp = "output the version of the application"
 )
+
+type versionCommand struct{}
+
+func (vc versionCommand) Help() string {
+	return versionCommandHelp
+}
+
+func (vc versionCommand) Run(args []string) int {
+	fmt.Println(appVersion)
+	return 0
+}
+
+func (vc versionCommand) Synopsis() string {
+	return versionCommandHelp
+}
+
+func versionFactory() (cli.Command, error) {
+	return versionCommand{}, nil
+}
 
 func main() {
 	c := cli.NewCLI("hashi-releases", "0.0.1")
 	c.Args = os.Args[1:]
 	c.Commands = index.Commands()
+	c.Commands["version"] = versionFactory
 	exitStatus, err := c.Run()
 	if err != nil {
 		panic(err)
