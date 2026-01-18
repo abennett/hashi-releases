@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"os"
 	"path"
@@ -15,7 +14,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/hashicorp/go-hclog"
 	"github.com/hashicorp/go-version"
 	"github.com/mitchellh/cli"
 )
@@ -32,8 +30,6 @@ var (
 	localArch = runtime.GOARCH
 
 	tmpDir = path.Join(os.TempDir(), "hashi-releases")
-
-	logger hclog.Logger
 )
 
 type Releases struct {
@@ -54,7 +50,7 @@ type Product struct {
 func (p *Product) sortVersions() error {
 	collection := make(version.Collection, len(p.Versions))
 	var idx int
-	for k, _ := range p.Versions {
+	for k := range p.Versions {
 		v, err := version.NewVersion(k)
 		if err != nil {
 			return err
@@ -151,7 +147,7 @@ func (b *Build) Download() ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	bts, err := ioutil.ReadAll(resp.Body)
+	bts, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -185,16 +181,16 @@ func NewIndex() Index {
 	}
 	cacheFilePath := path.Join(tmpDir, etag, etag+indexSuffix)
 
-	b, err := ioutil.ReadFile(cacheFilePath)
+	b, err := os.ReadFile(cacheFilePath)
 	if err != nil {
-		b, err = ioutil.ReadAll(resp.Body)
+		b, err = io.ReadAll(resp.Body)
 		if err != nil {
 			panic(err)
 		}
 		if err = os.MkdirAll(path.Dir(cacheFilePath), 0700); err != nil {
 			panic(err)
 		}
-		if err = ioutil.WriteFile(cacheFilePath, b, 0600); err != nil {
+		if err = os.WriteFile(cacheFilePath, b, 0600); err != nil {
 			panic(err)
 		}
 	}
@@ -245,7 +241,7 @@ func (i *Index) ListVersions(product string) []string {
 func (i *Index) ListProducts() []string {
 	products := make([]string, len(i.Products))
 	var idx int
-	for k, _ := range i.Products {
+	for k := range i.Products {
 		products[idx] = k
 		idx++
 	}

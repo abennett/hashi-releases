@@ -6,8 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"io/ioutil"
 	"net/http"
+	"os"
 	"path"
 	"strings"
 )
@@ -17,7 +17,7 @@ const (
 )
 
 func CheckFile(fpath string) error {
-	b, err := ioutil.ReadFile(fpath)
+	b, err := os.ReadFile(fpath)
 	if err != nil {
 		return err
 	}
